@@ -1,7 +1,9 @@
+from typing import Tuple
 import torch
 from scipy.stats import norm, binom_test
 import numpy as np
 from math import ceil
+from flex_sigma_bound import get_radius
 from statsmodels.stats.proportion import proportion_confint
 
 
@@ -21,7 +23,7 @@ class Smooth(object):
         self.num_classes = num_classes
         self.sigma = sigma
 
-    def certify(self, x: torch.tensor, n0: int, n: int, alpha: float, batch_size: int) -> (int, float):
+    def certify(self, x: torch.tensor, n0: int, n: int, alpha: float, batch_size: int) -> Tuple[int, float]:
         """ Monte Carlo algorithm for certifying that g's prediction around x is constant within some L2 radius.
         With probability at least 1 - alpha, the class returned by this method will equal g(x), and g's prediction will
         robust within a L2 ball of radius R around x.
@@ -110,3 +112,45 @@ class Smooth(object):
         :return: a lower bound on the binomial proportion which holds true w.p at least (1 - alpha) over the samples
         """
         return proportion_confint(NA, N, alpha=2 * alpha, method="beta")[0]
+
+
+class LipFlexSmooth(Smooth):
+    def __init__(self, sigma_generator, l, input_dim, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.sigma_gen = sigma_generator
+        self.Lipschitz = l
+        self.dimension = input_dim
+    
+    def certify(self, x: torch.tensor, n0: int, n: int, alpha: float, batch_size: int) -> Tuple[int, float]:
+        """ Monte Carlo algorithm for certifying that g's prediction around x is constant within some L2 radius.
+        With probability at least 1 - alpha, the class returned by this method will equal g(x), and g's prediction will
+        robust within a L2 ball of radius R around x.
+
+        :param x: the input [channel x height x width]
+        :param n0: the number of Monte Carlo samples to use for selection
+        :param n: the number of Monte Carlo samples to use for estimation
+        :param alpha: the failure probability
+        :param batch_size: batch size to use when evaluating the base classifier
+        :return: (predicted class, certified radius)
+                 in the case of abstention, the class will be ABSTAIN and the radius 0.
+        """
+        self.base_classifier.eval()
+        self.sigma = self.sigma_gen(x)
+        # draw samples of f(x+ epsilon)
+        counts_selection = self._sample_noise(x, n0, batch_size)
+        # use these samples to take a guess at the top class
+        cAHat = counts_selection.argmax().item()
+        # draw more samples of f(x + epsilon)
+        counts_estimation = self._sample_noise(x, n, batch_size)
+        # use these samples to estimate a lower bound on pA
+        nA = counts_estimation[cAHat].item()
+        pABar = self._lower_confidence_bound(nA, n, alpha)
+        if pABar < 0.5:
+            return Smooth.ABSTAIN, 0.0
+        else:
+            radius = get_radius(self.dimension, self.sigma, self.Lipschitz, pABar)
+            return cAHat, radius
+        
+    def predict(self, x: torch.tensor, n: int, alpha: float, batch_size: int) -> int:
+        self.sigma = self.sigma_gen(x)
+        return super().predict(x, n, alpha, batch_size)

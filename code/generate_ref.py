@@ -1,6 +1,7 @@
 # evaluate a smoothed classifier on a dataset
 import argparse
 import os
+
 from datasets import get_dataset, DATASETS, get_num_classes
 from core import Smooth
 from time import time
@@ -14,11 +15,13 @@ parser.add_argument("base_classifier", type=str, help="path to saved pytorch mod
 parser.add_argument("sigma", type=float, help="noise hyperparameter")
 parser.add_argument("outfile", type=str, help="output file")
 parser.add_argument("--batch", type=int, default=1000, help="batch size")
+parser.add_argument("--path", type=str, default=1000, help="output save path")
 parser.add_argument("--skip", type=int, default=1, help="how many examples to skip")
 parser.add_argument("--max", type=int, default=-1, help="stop after this many examples")
 parser.add_argument("--split", choices=["train", "test"], default="test", help="train or test set")
 parser.add_argument("--N0", type=int, default=100)
 parser.add_argument("--N", type=int, default=100000, help="number of samples to use")
+parser.add_argument("--k", type=int, default=1, help="use top-k examples")
 parser.add_argument("--alpha", type=float, default=0.001, help="failure probability")
 args = parser.parse_args()
 
@@ -37,6 +40,7 @@ if __name__ == "__main__":
 
     # iterate through the dataset
     dataset = get_dataset(args.dataset, args.split)
+    radius_dict = {}
     for i in range(len(dataset)):
 
         # only certify every args.skip examples, and stop after args.max examples
@@ -46,16 +50,24 @@ if __name__ == "__main__":
             break
 
         (x, label) = dataset[i]
-
+        if label not in radius_dict:
+            radius_dict[label] = {}
         before_time = time()
         # certify the prediction of g around x
         x = x.cuda()
         prediction, radius = smoothed_classifier.certify(x, args.N0, args.N, args.alpha, args.batch)
         after_time = time()
         correct = int(prediction == label)
-
+        radius_dict[label][i] = correct * radius
         time_elapsed = str(datetime.timedelta(seconds=(after_time - before_time)))
         print("{}\t{}\t{}\t{:.3}\t{}\t{}".format(
             i, label, prediction, radius, correct, time_elapsed), file=f, flush=True)
 
     f.close()
+    # Generate top-k radius examples as reference set
+    ref_list = []
+    for cls_dict in radius_dict.values():
+        sorted_idx = sorted(cls_dict.keys(), key=lambda x:cls_dict[x])
+        ref_list += sorted_idx[-args.k:]
+    x, _ = dataset[ref_list]
+    torch.save(x, args.path)
